@@ -136,7 +136,19 @@ class WebSocketHandler(tornado.web.RequestHandler):
 
     def _on_frame_type(self, callback, byte):
         if ord(byte) & 0x80 == 0x80:
-            raise Exception("Length-encoded format not yet supported")
+            def _payload_length(length, b_str):
+                b = ord(b_str)
+                length = length * 128 + (b & 0x7f)
+                if (b & 0x80) == 0:
+                    if length != 0:
+                        raise Exception("Length-encoded with length != 0" \
+                                        "not yet supported")
+                    if ord(byte) == 0xFF:
+                        self.stream.write('\xFF\x00')
+                else:
+                    raise Exception("Length-encoded format not yet supported")
+            length = 0
+            self.stream.read_bytes(1, functools.partial(_payload_length, length))
         self.stream.read_until(
             "\xff", functools.partial(self._on_end_delimiter, callback))
 
