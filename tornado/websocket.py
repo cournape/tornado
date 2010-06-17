@@ -13,11 +13,23 @@
 # WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 # License for the specific language governing permissions and limitations
 # under the License.
-
+import re
+import struct
 import functools
 import logging
 import tornado.escape
 import tornado.web
+
+try:
+    from hashlib import md5
+except ImportError:
+    from md5 import md5
+
+_INT_RE = re.compile("[^\d]")
+
+def key_to_bytes(key):
+    num = int(_INT_RE.sub("", key)) / key.count(" ")
+    return struct.pack("!I", num)
 
 class WebSocketHandler(tornado.web.RequestHandler):
     """A request handler for HTML 5 Web Sockets.
@@ -134,6 +146,47 @@ class WebSocketHandler(tornado.web.RequestHandler):
     def _not_supported(self, *args, **kwargs):
         raise Exception("Method not supported for Web Sockets")
 
+class WebSocketHandlerDraft76(WebSocketHandler):
+    def _execute(self, transforms, *args, **kw):
+        if self.request.headers.get("Upgrade") != "WebSocket" or \
+           self.request.headers.get("Connection") != "Upgrade" or \
+           not self.request.headers.get("Origin"):
+            message = "Expected WebSocket headers"
+            self.stream.write(
+                "HTTP/1.1 403 Forbidden\r\nContent-Length: " +
+                str(len(message)) + "\r\n\r\n" + message)
+            return
+        # WTF: Sec-WebSocket-* vs Sec-Websocket-* ????
+        key1 = self.request.headers.get("Sec-Websocket-Key1")
+        key2 = self.request.headers.get("Sec-Websocket-Key2")
+        if key1 is None or key2 is None:
+            message = "Support for draft <= 75 not implemented " \
+                      "(could not find keys)"
+            self.stream.write(
+                "HTTP/1.1 501 Not Implemented\r\nContent-Length: " +
+                str(len(message)) + "\r\n\r\n" + message)
+            return
+
+        def _handshake(key3):
+            challenge = ""
+            challenge += key_to_bytes(key1)
+            challenge += key_to_bytes(key2)
+            challenge += key3
+            digest = md5(challenge).digest()
+
+            self.stream.write(
+                "HTTP/1.1 101 Web Socket Protocol Handshake\r\n"
+                "Upgrade: WebSocket\r\n"
+                "Connection: Upgrade\r\n"
+                "Server: TornadoServer/0.1\r\n"
+                "Sec-WebSocket-Location: ws://" + self.request.host +
+                self.request.path + "\r\n"
+                "Sec-WebSocket-Origin: " + self.request.headers["Origin"] + "\r\n\r\n" +
+                digest)
+            self.async_callback(self.open)(*args, **kw)
+        self.stream.read_bytes(8, _handshake)
+
 for method in ["write", "redirect", "set_header", "send_error", "set_cookie",
                "set_status", "flush", "finish"]:
-    setattr(WebSocketHandler, method, WebSocketHandler._not_supported)
+    for klass in WebSocketHandler, WebSocketHandlerDraft76:
+        setattr(klass, method, klass._not_supported)
